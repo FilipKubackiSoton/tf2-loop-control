@@ -18,10 +18,11 @@ test_
 ```yaml
 action_name:
     {
+        cond: 
         loss_function: [str, tf.loss] , # tensroflow loss funciton
         variables: [None | List[tf.Variables]] , # variables to take part in training step, if None all varaibles works
         clipping: [None | Tuple[float, float]] , # gradient clipping, if None no clipping
-        exclude_variables [None | List[tf.Variables]] , # exclude variables from training step, if None no varaibles are excluded
+        excluded_variables [None | List[tf.Variables]] , # exclude variables from training step, if None no varaibles are excluded
         delay: {
             # if not specified then it's excluded from parsing
             epoch: [int] , # number of epochs when these action would not be active
