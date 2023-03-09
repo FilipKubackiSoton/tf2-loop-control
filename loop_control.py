@@ -1,18 +1,5 @@
 import tensorflow as tf
-from typing import Dict, Any, List, Tuple
-import functools
-from tensorflow_addons.utils import types
-from typeguard import typechecked
-import numpy as np
-import argparse
-from scipy.stats import truncnorm
-import ast
-import json
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # disable cuda sepeed up
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # disable CPU wornings
-
+from typing import Dict, Any, List
 
 def bind(instance, func, as_name=None):
     """
@@ -83,7 +70,10 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
         # bind slave train_steps to model
         self._bind_slaves_steps(self.config)
 
-        # bind reinitalization functionality to model only if reinitalizatoin config is provided
+        # bind reinitalization functionality to model
+        # only if reinitalizatoin config is provided.
+        # By default reinitialization condition is evaluated
+        # at the end of each training epoch.
         if self.reinit_config:
             self._bind_reinitialization(self.reinit_config)
 
@@ -91,12 +81,111 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
         self.model.optimizer.build(self.model.trainable_variables)
 
     def _bind_master_step(self, config: Dict[str, Any]) -> None:
+        """Bind train_step method to the model instance.
+        It is model internal funciton that is called for
+        each train step inside tf.fit(...) scope.
+        This steps constitutes compbination of smaller
+        training substeps that we call slaves steps.
+
+        Examples:
+            config = {"gate": { "cond": gate_open,
+                True: {"clipping": (-0.1, 0.1)}, False: {}},
+            "delay": {"cond": delay_reg,
+                True: {"loss": False, "regularize": True}}}
+            _bind_master_step(config) -> bind train_step function below
+
+            @tf.function
+            def train_step(self, data):
+                slave_loss = {'loss_gate' : tf.cond(self.control_variables['gate'],
+                        lambda: self.gate_on(data), lambda: self.gate_off(data)),
+                    'loss_delay' : tf.cond(self.control_variables['delay'],
+                        lambda: self.delay_on(data), lambda: 0.0)}
+
+                # sum losses from all train_slave_steps
+                losses = {**{'loss': slave_loss['loss_gate'] +
+                            slave_loss['loss_delay']},
+                            **slave_loss}
+                metrics = {m.name : m.result() for m in self.metrics}
+                metrics.pop("loss") # remove metric duplicate
+                control_states = {
+                    control_name: tf.cond(
+                        control_value,
+                        lambda: tf.constant(True),
+                        lambda: tf.constant(False),
+                    )
+                    for control_name, control_value in self.control_variables.items()
+                }
+
+                return {**losses, **metrics, **control_states}
+
+        Args:
+            config (Dict[str, Any]): Configuration for master step
+            interpreted from default configuration file passed as the
+            argumnet of the constructor.
+        """
         lscope = locals()
 
         def _get_losses(config: Dict[str, Any]) -> str:
+            """Return diconary with losses from all slave steps.
+            Losses are assigned to keys representing action names from
+            configuration file passed to the constructor. Each loss
+            is calculated based on the value of controling variables 
+            that can switch between two train_substeps or if 
+            one step is missing then it will simulate train_substep
+            by lambda: 0.0.
+
+            Examples:
+                # example of configuration file with two slave steps:
+                1. gate - controlled by self.control_variables['gate'],
+                which value is controlled callable gate_open
+                2. delay - controlled by self.control_variables['delay'],
+                which value is controlled callable delayopen
+                
+                In gate step False: {} represent step with default loss function,
+                etc. set at compilation time. Because True/False attributes
+                are in the "loss_gate" dictionary we bind two
+                train_slave_steps: self.gate_on and self.gate_off.
+
+                Similarely for "delay" the missing False branch for the "cond"
+                represents no train_slave_step at all; thus for False evaluation
+                of "delay" -> "cond" the callable is: lambda: 0.0.
+
+                config = {"gate": { "cond": gate_open,
+                    True: {"clipping": (-0.1, 0.1)}, False: {}},
+                "delay": {"cond": delay_reg,
+                    True: {"loss": False, "regularize": True}}}
+
+                _get_losses(config) ->
+                "{'loss_gate' : tf.cond(self.control_variables['gate'],
+                lambda: self.gate_on(data), lambda: self.gate_off(data)),
+                'loss_delay' : tf.cond(self.control_variables['delay'],
+                lambda: self.delay_on(data), lambda: 0.0)}"
+
+            Args:
+                config (Dict[str, Any]): Configuration for master step
+            interpreted from default configuration file passed as the
+            argumnet of the constructor.
+
+            Returns:
+                str: string for the train_step function that
+                aggregate losses from all train_slave_steps.
+                It's string form is later used to bind the train_step
+                funciton to the model class instance.
+            """
             def _substeps_condition_execution(
                 name: str, config: Dict[str, Any], on: bool
             ) -> str:
+                """Helper funciton.
+
+                Args:
+                    name (str): name of the train slave taken 
+                    config (Dict[str, Any]): slave step config
+                    on (bool): flag indicating if we consider on/off step
+
+                Returns:
+                    str: strings for train_slave_steps callable,
+                    not yet bind to the model instance.
+                """
                 if on:
                     return f"self.{name}_on(data)" if True in config else "0.0"
                 else:
@@ -140,6 +229,19 @@ def train_step(self, data):
             print("\n-------------------MASTER STEP-------------------")
             print(function_body)
 
+        """
+        Execute body function within both global and local scope.
+        Global scope provide libraries used inside the function body
+        like: import tensroflow as tf, etc...
+        Local scope provide references to the localy declared
+        instance like loss funciton. 
+        When we execute the funciton's body then I bind to the local
+        function scope (in this case the scope of _bind_master_step).
+        Then we bind the function to the instance of the model. As
+        soon as the main function (in this case _bind_master_step)
+        finishes execution then the funciton defined by the funcion body
+        is dereferenced as well as the local scope.
+        """
         exec(function_body, {**globals(), **lscope}, lscope)
         bind(self.model, lscope["train_step"])
 
