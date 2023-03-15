@@ -30,6 +30,14 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
         *args,
         **kwargs,
     ) -> None:
+        """_summary_
+
+        Args:
+            config (int): _description_
+            reinit_config (Dict[str, Any], optional): _description_. Defaults to None.
+            default_in_branch (_type_, optional): _description_. Defaults to { "loss": True, "regularize": None, "clipping": None, "variables": None, "excluded_variables": None, }.
+            verbose (bool, optional): _description_. Defaults to True.
+        """
         super(LoopControlerCallback, self).__init__(*args, **kwargs)
         self.default_in_branch: Dict[str, Any] = default_in_branch
         self.config: Dict[str, Any] = config
@@ -245,7 +253,26 @@ def train_step(self, data):
         exec(function_body, {**globals(), **lscope}, lscope)
         bind(self.model, lscope["train_step"])
 
-    def _bind_slaves_steps(self, config) -> None:
+    def _bind_slaves_steps(self, config: Dict[str, Any]) -> None:
+        """Iterate over all slave steps and call _bind_slave_step to 
+        bind train_substeps for each slave step. If config argument
+        has no key evaluating to True or False then such a train_substep
+        is omitted and repleced by lambda: tf.const(0.0, dtype=tf.float32)
+        in maste step (self.train_step). 
+        Args:
+            config (Dict[str, Any]): dictionary holding a map slave step name
+            that maps to the dicionary holding:
+            cond: callable - condition modyfing control varaibles
+            True - dictionary with the map of argument passed to create custom
+            train_substep called then cond evaluates to True. If True key
+            is missing then master step calls instead:
+            lambda: tf.const(0.0, dtype=tf.float32)
+            False - dictionary with the map of argument passed to create custom
+            train_substep called then cond evaluates to False. If False key
+            is missing then master step calls instead:
+            lambda: tf.const(0.0, dtype=tf.float32)
+        """
+
         if self.verbose:
             print("-------------------SLAVE STEPS-------------------\n")
 
@@ -255,12 +282,60 @@ def train_step(self, data):
             if False in action_config:
                 self._bind_slave_step(action_name, action_config[False], False)
 
-    def _bind_slave_step(
-        self, action_name: str, fn_config: Dict[str, Any], branch: bool
-    ) -> None:
+    def _foo(self, action_name: str, fn_config: Dict[str, Any], branch: bool) -> None:
+        """_summary_
+
+        
+        """
+
+
+    def _bind_slave_step(self, action_name: str, fn_config: Dict[str, Any], branch: bool) -> None:
+        """Bind train_substep method to the model instance.
+        It is model internal funciton that is called by
+        the train_step. This step implements the whole
+        logic related to the model's weight updates.
+
+        Examples:
+            action_name = "gate"
+            fn_config = {
+                'loss': <keras.engine.compile_utils.LossesContainer object at 0x7fa79c2bd250>, 
+                'regularize': None,
+                'clipping': (-0.1, 0.1),
+                'variables': None,
+                'excluded_variables': <function get_gates_variables at 0x7fa79d3e0670>}
+            branch = True
+            _bind_slave_step(action_name, fn_config, branch) ->
+
+            @tf.function
+            def gate_on(self, data):
+                x, y = data
+                with tf.GradientTape(watch_accessed_variables=False) as tape:
+                    
+                    for g in self._excluded_variables['gate'][True]:
+                        tape.watch(g)
+                        
+                    logits = self(x, training=True)
+                    loss_value =  loss(y, logits)
+                    
+                grads = tape.gradient(loss_value, tape.watched_variables())
+                self.optimizer.apply_gradients(zip([
+                    tf.clip_by_value(g, -0.1, 0.1) for g in grads
+                    ], tape.watched_variables()))
+                self.compiled_metrics.update_state(y, logits)
+                return loss_value
+
+        Args:
+            action_name (str): action name of a slave_step
+            fn_config (Dict[str, Any]): Configuration for train_substep
+            interpreted from default configuration file passed as the
+            argumnet of the constructor.
+            branch (bool): predicate if we generate train_substep for
+            True or False evaluation of the slave step.
+        """
+
         lscope = {**locals(), **fn_config}
         fn_name = self._get_actoin_step_name(action_name, branch)
-        if fn_config["loss"] == False:
+        if not fn_config["loss"]:
             # dummy error that will be anyway scale by 0 to make graph to compile otherwise
             # ---> 15     retval_ = ag__.converted_call(ag__.ld(step_function), (ag__.ld(self), ag__.ld(iterator)), None, fscope)
             # ValueError: None values not supported.
@@ -286,8 +361,6 @@ def {fn_name}(self, data):
         logits = self(x, training=True)
         loss_value = {'tf.constant(0, dtype=tf.float32) *'  if fn_config["loss"]==False else ''} loss(y, logits)
         """
-        # loss_value = {'loss(y, logits)' if fn_config["loss"] else 'tf.constant(0, dtype=tf.float32)'}
-        # loss_value = {'loss(y, logits)' if fn_config["loss"] else 'tf.math.reduce_sum(self.losses)'}
 
         if fn_config["regularize"]:
             function_body += f"""
