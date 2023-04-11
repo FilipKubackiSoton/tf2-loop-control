@@ -1,5 +1,5 @@
 import tensorflow as tf
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 def bind(instance, func, as_name=None):
     """
@@ -18,7 +18,7 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
     def __init__(
         self,
         config: int,
-        reinit_config: Dict[str, Any] = None,
+        async_config: Dict[str, Any] = None,
         default_in_branch: Dict[str, Any] = {
             "loss": True,
             "regularize": None,
@@ -41,7 +41,7 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
         super(LoopControlerCallback, self).__init__(*args, **kwargs)
         self.default_in_branch: Dict[str, Any] = default_in_branch
         self.config: Dict[str, Any] = config
-        self.reinit_config = reinit_config
+        self.async_config = async_config
         self.verbose: bool = verbose
 
     def on_train_begin(self, logs=None):
@@ -55,13 +55,9 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
         # meta attributes for building conditions
         self.epochs: int = 0
         self.batches: int = 0
+        self.batches_in_epochs: int = 0
         self.history: List[Any] = []
-
-        # meta attributes for reinitialization handeling
-        self.reinit_epochs: int = 0
-        self.reinit_batches: int = 0
-        self.reinit_history: List[Any] = []
-        self.reinit_current_history: List[Any] = []
+        self._global_history: List[Any] = []
 
         # extend config with validation step
         self.config = self._extend_config(self.config)
@@ -78,14 +74,11 @@ class LoopControlerCallback(tf.keras.callbacks.Callback):
         # bind slave train_steps to model
         self._bind_slaves_steps(self.config)
 
-        # bind reinitalization functionality to model
-        # only if reinitalizatoin config is provided.
-        # By default reinitialization condition is evaluated
-        # at the end of each training epoch.
-        if self.reinit_config:
-            self._bind_reinitialization(self.reinit_config)
+        # bind asycn. action to model and callback
+        if self.async_config:
+            self._bind_async_controlers(self.async_config)
 
-        # test
+        # recompile model
         self.model.optimizer.build(self.model.trainable_variables)
 
     def _bind_master_step(self, config: Dict[str, Any]) -> None:
@@ -218,7 +211,8 @@ def train_step(self, data):
     # losses = {{**{{'loss': slave_loss['loss_delay'] + slave_loss['loss_gate']}}, **slave_loss}}
     losses = {{**{{'loss': slave_loss['loss_gate']}}, **slave_loss}}
     metrics = {{m.name : m.result() for m in self.metrics}}
-    metrics.pop("loss")
+    if "loss" in metrics:
+        metrics.pop("loss")
     control_states = {{
         control_name: tf.cond(
             control_value,
@@ -281,12 +275,6 @@ def train_step(self, data):
                 self._bind_slave_step(action_name, action_config[True], True)
             if False in action_config:
                 self._bind_slave_step(action_name, action_config[False], False)
-
-    def _foo(self, action_name: str, fn_config: Dict[str, Any], branch: bool) -> None:
-        """_summary_
-
-        
-        """
 
 
     def _bind_slave_step(self, action_name: str, fn_config: Dict[str, Any], branch: bool) -> None:
@@ -359,8 +347,9 @@ def {fn_name}(self, data):
 
         function_body += f"""
         logits = self(x, training=True)
-        loss_value = {'tf.constant(0, dtype=tf.float32) *'  if fn_config["loss"]==False else ''} loss(y, logits)
-        """
+        loss_value = {'tf.constant(0, dtype=tf.float32)' if not fn_config["loss"] else 'loss(y, logits)'}"""
+        # loss_value = {'tf.constant(0, dtype=tf.float32) *' if fn_config["loss"]==False else ''} loss(y, logits)"""
+
 
         if fn_config["regularize"]:
             function_body += f"""
@@ -397,7 +386,6 @@ def {fn_name}(self, data):
 
     def on_epoch_begin(self, epoch: int, logs) -> None:
         self.epochs += 1
-        self.reinit_epochs += 1
         """Control gating variable from the level of callback which can work on epoch/batch level."""
         # tf.variable.assign is different than tf.variable = <sth>. The second option is compiled to static
         # value in TF graph of computation as the result of @tf.function decorators in LoopControlableModel
@@ -406,26 +394,26 @@ def {fn_name}(self, data):
                 getattr(self, self.control_conditions[action_name])()
             )
 
-        # early stopping
-        if (
-            tf.experimental.numpy.log10(
-                tf.math.reduce_mean([x["loss"] for x in self.reinit_history][-3000:])
-            )
-            < -10
-        ):
-            tf.print("\nEARLY STOPPING\n")
-            self.model.stop_training = True
-
-        # reinitlaization
-        if self.reinit_config and self.reinitialize_cond():
-            self.reinitialize()
-
     def on_epoch_end(self, epoch, logs=None):
+        # reset metric states for clear metric logs
         self.model.compiled_metrics.reset_state()
+
+        # evaluate async. actions
+        for async_action_name, _ in self.async_config.items():
+            cond_name, model_name, callback_name = self._get_async_function_names(async_action_name)
+            if hasattr(self, cond_name) and getattr(self, cond_name)():
+                if hasattr(self.model, model_name):
+                    if self.verbose:
+                        tf.print(f"\n-------------------{model_name}-------------------\n")
+                    getattr(self.model, model_name)()
+                
+                if hasattr(self, callback_name):
+                    if self.verbose:
+                        tf.print(f"\n-------------------{callback_name}-------------------\n")
+                    getattr(self, callback_name)()
 
     def on_batch_end(self, batch, logs):
         self.batches += 1
-        self.reinit_batches += 1
         """Control gating variable from the level of callback which can work on epoch/batch level."""
         # tf.variable.assign is different than tf.variable = <sth>.
         # The second option is compiled to static value in TF graph
@@ -437,7 +425,7 @@ def {fn_name}(self, data):
             )
 
         self.history.append(logs)
-        self.reinit_history.append(logs)
+        self._global_history.append(logs)
 
     def _get_actoin_step_name(self, action_name: str, branch: bool) -> str:
         return f"{action_name}_on" if branch else f"{action_name}_off"
@@ -558,25 +546,40 @@ def {fn_name}(self, data):
                     if x.name not in exclude_variables_names
                 ]
 
-    def reinitialize(self):
-        if self.verbose:
-            tf.print("\n-------------------Reinitializatoin-------------------\n")
-        self.model.reinitialize()
-        self.reinit_history = []
-        self.reinit_epochs = 0
-        self.reinit_batches = 0
+    def _get_async_function_names(self, action_name: str) -> Tuple[str, str, str]:
+        """Generate predetermined names of callables for async. actions.
 
-    def _bind_reinitialization(self, reinit_config: Dict[str, Any]) -> None:
-        bind(self, self.reinit_config["cond"], "reinitialize_cond")
+        Args:
+            action_name (str): action name
 
-        if reinit_config["reinit_fn"]:
-            Warning(
-                "binding reinitalization method from reinit_config to the model instance."
-            )
-            bind(self.model, reinit_config["reinit_fn"], "reinitialize")
-        else:
-            if not callable(getattr(self.model.__class__, "reinitialize", None)):
-                raise ReferenceError("model has no self.reinitialize() method")
-            Warning(
-                "reinit_fn from reinit_config is none: using self.reinitialize() from the model instance."
-            )
+        Returns:
+            Tuple[str, str, str]: three strings of callables names: action condition, function binding to
+        the model, and function binding to the callback.
+        """
+        return f"async_{action_name}_cond", f"async_{action_name}_model", f"async_{action_name}_callback"
+    
+    def _bind_async_controlers(self, async_config: Dict[str, Dict[str, callable]]) -> None:
+        """Bind async action to the model and callback instance
+
+        Args:
+            async_config (Dict[str, Dict[str, callable]]): Dicionary maping from the action name to another
+            dicionary with map from key set of "cond"|"model"|"callback". Condition evaluates tracking attributes 
+            by the callback. While callables from "model"|"callback" bind to the model and callback instance respectively.
+
+            We follow new callables naming convention from the _get_async_function_names. 
+
+            Condition is evaluated at the end of each epoch and callables passed to "model"|"callback" are executed.
+        """
+        for action_name, action_config in async_config.items():
+            cond_name, model_name, callback_name = self._get_async_function_names(action_name)
+            if "cond" not in action_config:
+                Warning(f"action: {action_name} has no config, hence is ommited in the training")
+                continue
+            else:
+                bind(self, action_config["cond"], cond_name)
+            
+            if "model" in action_config:
+                bind(self.model, action_config["model"], model_name)
+                
+            if "callback" in action_config:
+                bind(self.model, action_config["callback"], callback_name)
