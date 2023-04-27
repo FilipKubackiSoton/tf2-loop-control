@@ -49,12 +49,6 @@ class NALU(tf.keras.layers.Layer):
         self.m_initializer = m_initializer
         self.g_initializer = g_initializer
 
-        self.gate_as_vector = True
-        self.force_operation = None
-        self.weights_separation = True
-        self.input_gate_dependance = False
-        self.initializer = None
-
     def build(self, input_shape):
         # action variables
         self.w_hat = self.add_weight(
@@ -101,8 +95,7 @@ class NALU(tf.keras.layers.Layer):
     @tf.function
     def get_reg_loss(self):
         var_list = [self.w_hat, self.m_hat, self.g]
-        if self.weights_separation:
-            var_list += [self.w_hat_prime, self.m_hat_prime]
+        var_list += [self.w_hat_prime, self.m_hat_prime]
         return self.reg_fn(var_list)
 
     def call(self, input):

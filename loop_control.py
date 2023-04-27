@@ -428,9 +428,26 @@ def {fn_name}(self, data):
         self._global_history.append(logs)
 
     def _get_actoin_step_name(self, action_name: str, branch: bool) -> str:
+        """Get action name based on the evaluation branch
+
+        Args:
+            action_name (str): raw action name
+            branch (bool): flag indicating either positive and negative 
+            cond evaluation.
+
+        Returns:
+            str: adjusted action name with evaluation flag
+        """
         return f"{action_name}_on" if branch else f"{action_name}_off"
 
-    def _bind_controlers(self, config) -> None:
+    def _bind_controlers(self, config: Dict[str: Any]) -> None:
+        """Bind callables that control the controling variables. The callable
+        binds to the callback instance as it should incoporate the training
+        data into the training logic.
+
+        Args:
+            config (Dict[str, Any]): Configuration to control model training
+        """
         self.model.control_variables = {}
         self.control_conditions = {}
         for action_name, action_config in config.items():
@@ -501,6 +518,18 @@ def {fn_name}(self, data):
         return pc
 
     def _extract_substeps_varialbe_arrays(self, config: Dict[str, Any]) -> None:
+        """Evaluate callables extracting subsets of trainable variables and 
+        bind them as arrays of variables to the model instance. For the sake
+        of code readability, store all variables' arrays in two dictionaries: 
+            - _included_variables: for arrays of included varaibles
+            - _excluded_variables: for arryys of excluded variables
+        We should keep in mind that there is no TF's API to pop varaibles
+        from Gradient Tape. Therefore, variables exclusion happens by
+        constructing arrays of all except excluded variables.
+
+        Args:
+            config (Dict[str, Any]): training config
+        """
         # keep varaibles from variable attribute from config file
         self.model._included_variables = {}
         # keep varaibles from excluded_variable attribute from config file
