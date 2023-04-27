@@ -1,4 +1,4 @@
-# Loop Control Callback Dictionary of Configuration
+# Custom Training Procedure in TenosrFlow 2 - using default *tf.fit*
 
 ## Aim of this work
 The aim of this work is to engineer and test a new approach towards the Tensor-
